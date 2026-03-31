@@ -44,7 +44,6 @@ auth_app = typer.Typer(help="Authenticate with the Yoto API.")
 reconcile_app = typer.Typer(help="Compare local audiobooks with the Yoto library.")
 library_app = typer.Typer(help="Inspect Yoto library metadata.")
 series_app = typer.Typer(help="Series detection and grouping workflows.")
-metadata_app = typer.Typer(help="Enrich and repair Yoto metadata.")
 console = Console()
 logger = logging.getLogger(__name__)
 
@@ -178,7 +177,6 @@ app.add_typer(auth_app, name="auth")
 app.add_typer(reconcile_app, name="reconcile")
 app.add_typer(library_app, name="library")
 app.add_typer(series_app, name="series")
-app.add_typer(metadata_app, name="metadata")
 
 
 def get_context(ctx: typer.Context) -> AppContext:
@@ -1446,15 +1444,150 @@ def library_fix_imports(ctx: typer.Context) -> None:
 
 
 @library_app.command("enrich")
-def library_enrich(ctx: typer.Context) -> None:
-    """Add missing numbered chapter icons to all local cards.
+def library_enrich(
+    ctx: typer.Context,
+    icons: Annotated[
+        bool,
+        typer.Option("--icons/--no-icons", help="Add missing numbered chapter icons."),
+    ] = True,
+    authors: Annotated[
+        bool,
+        typer.Option("--authors/--no-authors", help="Guess missing authors via LLM."),
+    ] = True,
+    descriptions: Annotated[
+        bool,
+        typer.Option("--descriptions/--no-descriptions", help="Generate missing descriptions via LLM."),
+    ] = True,
+    tag_series: Annotated[
+        bool,
+        typer.Option("--tag-series/--no-tag-series", help="Stamp series info into descriptions from cached suggestions."),
+    ] = True,
+) -> None:
+    """Enrich all local cards with missing metadata.
 
-    Modifies card.json files so they show as modified for the next push.
+    By default runs all enrichment steps: chapter icons, authors (LLM),
+    descriptions (LLM), and series description tags.  Use flags to select
+    specific steps, e.g. ``--no-authors --no-descriptions`` to only do
+    icons and series tags.
     """
     app_context = get_context(ctx)
     lib = _require_local_library(app_context)
-    summary = lib.enrich_cards()
-    app_context.console.print(summary)
+    combined: dict[str, Any] = {}
+
+    if icons:
+        app_context.console.print("[bold]Step 1/4:[/bold] Chapter icons")
+        combined["icons"] = lib.enrich_cards()
+
+    if authors:
+        app_context.console.print("[bold]Step 2/4:[/bold] Authors (LLM)")
+        combined["authors"] = run_async_command(
+            _enrich_metadata_authors(app_context), app_context.console
+        )
+
+    if descriptions:
+        app_context.console.print("[bold]Step 3/4:[/bold] Descriptions (LLM)")
+        combined["descriptions"] = run_async_command(
+            _enrich_metadata_descriptions(app_context), app_context.console
+        )
+
+    if tag_series:
+        app_context.console.print("[bold]Step 4/4:[/bold] Series description tags")
+        combined["tag_series"] = _tag_series_descriptions(app_context)
+
+    app_context.console.print(combined)
+
+
+@library_app.command("health")
+def library_health(ctx: typer.Context) -> None:
+    """Check metadata completeness of all local cards.
+
+    Reports which cards are missing description, series, author,
+    chapter icons, or cover art.
+    """
+    from rich.table import Table
+
+    app_context = get_context(ctx)
+    lib = _require_local_library(app_context)
+    all_cards = lib.load_all_cards()
+
+    issues: list[dict[str, Any]] = []
+    totals = {
+        "total": len(all_cards),
+        "missing_description": 0,
+        "missing_series": 0,
+        "missing_author": 0,
+        "missing_cover": 0,
+        "missing_chapter_icons": 0,
+    }
+
+    for card_id, payload in all_cards:
+        meta = payload.get("metadata") or {}
+        title = resolve_title(payload)
+        card_issues: list[str] = []
+
+        # Description
+        desc = meta.get("description")
+        if not desc or not str(desc).strip():
+            card_issues.append("no description")
+            totals["missing_description"] += 1
+
+        # Series
+        series = meta.get("series")
+        if not series or not str(series).strip():
+            card_issues.append("no series")
+            totals["missing_series"] += 1
+
+        # Author
+        author = resolve_author(payload)
+        if not author:
+            card_issues.append("no author")
+            totals["missing_author"] += 1
+
+        # Cover
+        cover_url = meta.get("cover", {}).get("imageL") if isinstance(meta.get("cover"), dict) else None
+        has_local_cover = lib.cover_file_for_card(card_id) is not None
+        if not cover_url and not has_local_cover:
+            card_issues.append("no cover")
+            totals["missing_cover"] += 1
+
+        # Chapter icons
+        chapters = payload.get("content", {}).get("chapters", [])
+        chapters_missing_icons = 0
+        for ch in chapters:
+            ch_icon = (ch.get("display") or {}).get("icon16x16")
+            if not ch_icon:
+                chapters_missing_icons += 1
+        if chapters_missing_icons > 0:
+            card_issues.append(f"icons missing on {chapters_missing_icons}/{len(chapters)} chapters")
+            totals["missing_chapter_icons"] += 1
+
+        if card_issues:
+            issues.append({"card_id": card_id, "title": title, "issues": card_issues})
+
+    # Print a Rich table for cards with issues
+    table = Table(title="Library Health", show_lines=False)
+    table.add_column("Card ID", style="dim", no_wrap=True)
+    table.add_column("Title", no_wrap=True)
+    table.add_column("Issues", style="yellow")
+
+    for entry in issues:
+        table.add_row(entry["card_id"], entry["title"], ", ".join(entry["issues"]))
+
+    app_context.console.print(table)
+
+    healthy = totals["total"] - len(issues)
+    app_context.console.print(
+        {
+            "total_cards": totals["total"],
+            "healthy": healthy,
+            "cards_with_issues": len(issues),
+            "missing_description": totals["missing_description"],
+            "missing_series": totals["missing_series"],
+            "missing_author": totals["missing_author"],
+            "missing_cover": totals["missing_cover"],
+            "missing_chapter_icons": totals["missing_chapter_icons"],
+        }
+    )
 
 
 async def _recover_covers(app_context: AppContext, card_ids: list[str] | None = None) -> dict[str, Any]:
@@ -1680,12 +1813,88 @@ def series_suggest(
     )
 
 
-@metadata_app.command("enrich")
-def metadata_enrich(ctx: typer.Context) -> None:
-    """Guess and fill missing metadata authors for library cards."""
-    app_context = get_context(ctx)
-    summary = run_async_command(_enrich_metadata_authors(app_context), app_context.console)
-    app_context.console.print(summary)
+async def _enrich_metadata_descriptions(app_context: AppContext) -> dict[str, Any]:
+    from yoto_bulk.card_utils import MAX_DESCRIPTION_LENGTH
+
+    lib = _require_local_library(app_context)
+    llm_service = app_context.llm
+    all_cards = lib.load_all_cards()
+
+    cards_with_ids = [(cid, payload) for cid, payload in all_cards if cid]
+    candidates = [
+        (cid, payload)
+        for cid, payload in cards_with_ids
+        if not (payload.get("metadata") or {}).get("description", "").strip()
+    ]
+
+    summary: dict[str, Any] = {
+        "library_count": len(cards_with_ids),
+        "missing_description_count": len(candidates),
+        "processed": 0,
+        "updated": 0,
+        "skipped": 0,
+        "failed": 0,
+        "results": [],
+    }
+
+    if not candidates:
+        return summary
+
+    progress = _make_progress(app_context.console)
+
+    with progress:
+        task_id = progress.add_task("Enriching descriptions", total=len(candidates))
+        for card_id, payload in candidates:
+            title = _resolve_card_title(payload)
+            author = _extract_metadata_author(payload)
+            result: dict[str, Any] = {"card_id": card_id, "title": title}
+            progress.update(task_id, description=f"Processing {title}")
+
+            if app_context.dry_run:
+                result["status"] = "dry_run"
+                summary["skipped"] += 1
+                summary["results"].append(result)
+                summary["processed"] += 1
+                progress.advance(task_id)
+                continue
+
+            try:
+                description = await asyncio.to_thread(
+                    llm_service.generate_description, title, author
+                )
+                description = description[:MAX_DESCRIPTION_LENGTH]
+            except Exception as exc:
+                logger.warning(
+                    "Skipping description enrichment because the LLM call failed",
+                    extra={"card_id": card_id, "title": title, "error": str(exc)},
+                )
+                summary["failed"] += 1
+                result.update({"status": "llm_failed", "error": str(exc)})
+                summary["results"].append(result)
+                summary["processed"] += 1
+                progress.advance(task_id)
+                continue
+
+            try:
+                metadata = ensure_metadata(payload)
+                metadata["description"] = description
+                lib.save_card(card_id, payload)
+                summary["updated"] += 1
+                result["description"] = description
+                result["status"] = "updated_locally"
+            except Exception as exc:
+                logger.warning(
+                    "Skipping description enrichment because local save failed",
+                    extra={"card_id": card_id, "title": title, "error": str(exc)},
+                )
+                summary["failed"] += 1
+                result.update({"status": "save_failed", "error": str(exc)})
+            finally:
+                summary["results"].append(result)
+                summary["processed"] += 1
+                progress.advance(task_id)
+
+    return summary
 
 
 def _tag_series_descriptions(app_context: AppContext) -> dict[str, Any]:
@@ -1693,9 +1902,7 @@ def _tag_series_descriptions(app_context: AppContext) -> dict[str, Any]:
     lib = _require_local_library(app_context)
     cache_path = app_context.settings.series_suggestions_path
     if not cache_path.exists():
-        raise typer.BadParameter(
-            "No cached series suggestions found. Run `series suggest` first to generate them."
-        )
+        return {"skipped": True, "reason": "No cached series suggestions. Run `series suggest` first."}
 
     suggestions = json.loads(cache_path.read_text(encoding="utf-8"))
     series_mapping = suggestions.get("series", {})
@@ -1780,14 +1987,6 @@ def _tag_series_descriptions(app_context: AppContext) -> dict[str, Any]:
             progress.advance(task_id)
 
     return summary
-
-
-@metadata_app.command("tag-series")
-def metadata_tag_series(ctx: typer.Context) -> None:
-    """Stamp 'Series: X | Book: N' into card descriptions using cached series suggestions."""
-    app_context = get_context(ctx)
-    summary = _tag_series_descriptions(app_context)
-    app_context.console.print(summary)
 
 
 @series_app.command("missing")

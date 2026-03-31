@@ -911,6 +911,12 @@ class LocalLibrary:
         if sequence_number is not None:
             payload["metadata"]["sequence_number"] = sequence_number
 
+        # Description from ID3 comment tag
+        comment = id3.get("comment", "")
+        if comment:
+            from yoto_bulk.card_utils import MAX_DESCRIPTION_LENGTH
+            payload["metadata"]["description"] = comment[:MAX_DESCRIPTION_LENGTH]
+
         # Use a temporary ID until pushed to Yoto
         import secrets
         temp_id = f"import-{secrets.token_urlsafe(6)}"
@@ -1096,8 +1102,8 @@ def _extract_id3_metadata(zf: "zipfile.ZipFile", entry: str) -> dict[str, Any]:
     """Read ID3 tags from an MP3 inside a zip file.
 
     Returns a dict with optional keys: ``album``, ``author``, ``track_title``,
-    ``track_number``, ``track_total``, ``year``, ``genre``, ``cover_data``,
-    ``cover_mime``.  Non-MP3 files return an empty dict.
+    ``track_number``, ``track_total``, ``year``, ``genre``, ``comment``,
+    ``cover_data``, ``cover_mime``.  Non-MP3 files return an empty dict.
     """
     if not entry.lower().endswith(".mp3"):
         return {}
@@ -1149,6 +1155,13 @@ def _extract_id3_metadata(zf: "zipfile.ZipFile", entry: str) -> dict[str, Any]:
         # Genre (e.g. "Audiobooks")
         if "TCON" in tags:
             result["genre"] = str(tags["TCON"].text[0]).strip()
+
+        # Comment (COMM) → description
+        comm_frames = tags.getall("COMM")
+        if comm_frames:
+            comment = str(comm_frames[0].text[0]).strip() if comm_frames[0].text else ""
+            if comment:
+                result["comment"] = comment
 
         # Embedded cover art (APIC)
         apic_frames = tags.getall("APIC")

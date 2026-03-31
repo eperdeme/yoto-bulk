@@ -322,3 +322,62 @@ Series to complete:
         except APIError as e:
             logger.error("OpenAI API Error during series completion: %s", e)
             raise
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception_type((RateLimitError, APIConnectionError)),
+        reraise=True,
+    )
+    def generate_description(self, title: str, author: str | None = None) -> str:
+        """Generate a short book description suitable for the Yoto app.
+
+        Returns a concise description (1-3 sentences, ≤500 chars).
+        """
+        cleaned_title = title.strip()
+        if not cleaned_title:
+            raise ValueError("Cannot generate a description for an empty title.")
+
+        author_hint = f" by {author}" if author else ""
+        system_prompt = (
+            "You are an expert children's librarian. "
+            "Write a short, engaging description for the given children's audiobook. "
+            "The description should be 1-3 sentences, suitable for parents browsing a library. "
+            "Do NOT include the title or author in the description. "
+            "Return ONLY the description text, nothing else."
+        )
+        user_prompt = (
+            f"Write a short description for the children's audiobook "
+            f"'{cleaned_title}'{author_hint}."
+        )
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.settings.openai_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.3,
+            )
+
+            content = response.choices[0].message.content or ""
+            description = content.strip()
+
+            if not description:
+                raise ValueError(f"OpenAI returned an empty description for '{cleaned_title}'.")
+
+            return description
+
+        except AuthenticationError:
+            logger.error("OpenAI API key is invalid or expired")
+            raise
+        except RateLimitError:
+            logger.warning("OpenAI rate limit hit for '%s', will retry", cleaned_title)
+            raise
+        except APIConnectionError:
+            logger.warning("OpenAI connection error for '%s', will retry", cleaned_title)
+            raise
+        except APIError as e:
+            logger.error("OpenAI API Error while generating description for '%s': %s", cleaned_title, e)
+            raise

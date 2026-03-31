@@ -977,26 +977,30 @@ def _normalize_audio_file(input_path: Path, output_dir: Path) -> Path | None:
 
     Writes the normalized version into *output_dir* and returns the path.
     Returns ``None`` on failure so callers can fall back to the original.
+
+    This function is synchronous (blocking) — call via
+    ``asyncio.to_thread`` when used from async code.
     """
     import subprocess
 
     output_path = output_dir / input_path.name
-    codec_map = {
-        ".mp3": "libmp3lame",
-        ".m4a": "aac",
-        ".ogg": "libvorbis",
-        ".flac": "flac",
-        ".wav": "pcm_s16le",
-        ".aac": "aac",
-        ".opus": "libopus",
+    ext = input_path.suffix.lower()
+    # codec + quality args per format; lossless codecs get no bitrate flag
+    codec_opts: dict[str, list[str]] = {
+        ".mp3":  ["-acodec", "libmp3lame", "-q:a", "2"],
+        ".m4a":  ["-acodec", "aac", "-q:a", "2"],
+        ".aac":  ["-acodec", "aac", "-q:a", "2"],
+        ".ogg":  ["-acodec", "libvorbis", "-q:a", "4"],
+        ".opus": ["-acodec", "libopus", "-b:a", "128k"],  # opus needs explicit bitrate
+        ".flac": ["-acodec", "flac"],
+        ".wav":  ["-acodec", "pcm_s16le"],
     }
-    codec = codec_map.get(input_path.suffix.lower(), "libmp3lame")
+    extra = codec_opts.get(ext, ["-acodec", "libmp3lame", "-q:a", "2"])
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(input_path),
         "-af", "loudnorm=I=-23:TP=-1:LRA=11",
-        "-acodec", codec,
-        "-b:a", "128k",
+        *extra,
         str(output_path),
     ]
     try:
@@ -1059,7 +1063,10 @@ async def _upload_audio_for_card(
                 task_id,
                 description=f"Normalizing {title} ({idx + 1}/{len(audio_files)})",
             )
-            normalized = _normalize_audio_file(audio_path, temp_dir)
+            # Run blocking ffmpeg in a thread so the event loop stays responsive
+            normalized = await asyncio.to_thread(
+                _normalize_audio_file, audio_path, temp_dir,
+            )
             if normalized:
                 upload_files[idx] = normalized
 

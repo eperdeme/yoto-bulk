@@ -1,0 +1,40 @@
+[project]
+name = "yoto-bulk"
+version = "0.1.0"
+description = "CLI for bulk operations against a Yoto library"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "httpx>=0.28.1",
+  "pydantic>=2.11.3",
+  "pydantic-settings>=2.8.1",
+  "rich>=14.0.0",
+  "tenacity>=9.1.2",
+  "typer>=0.15.2",
+  "openai>=1.72.0",
+  "mutagen>=1.47.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.5",
+  "ruff>=0.11.4",
+]
+
+[project.scripts]
+yoto-bulk = "yoto_bulk.cli:app"
+
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+

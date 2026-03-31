@@ -18,11 +18,14 @@ import httpx
 
 from yoto_bulk.card_utils import (
     card_to_yoto_book,
+    normalize_title,
+    normalize_title_for_dedup,
     resolve_author,
     resolve_authors,
     resolve_series,
     resolve_sequence_number,
     resolve_title,
+    word_set,
 )
 from yoto_bulk.models import YotoBook
 
@@ -131,6 +134,37 @@ class LocalLibrary:
     # Card I/O
     # ------------------------------------------------------------------
 
+    @property
+    def versions_dir(self) -> Path:
+        """Directory where pre-push card backups are stored."""
+        return self._meta_dir / "versions"
+
+    def backup_card(self, card_id: str) -> Path | None:
+        """Save a timestamped backup of a card's payload before pushing.
+
+        Returns the backup file path, or ``None`` when the card cannot be
+        loaded.  Backups are stored under
+        ``.yoto-bulk/versions/{cardId}/{timestamp}.json``.
+        """
+        payload = self.load_card(card_id)
+        if payload is None:
+            return None
+        dest_dir = self.versions_dir / card_id
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        dest = dest_dir / f"{ts}.json"
+        dest.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        return dest
+
+    def list_backups(self, card_id: str) -> list[Path]:
+        """Return saved backups for a card (newest first)."""
+        dest_dir = self.versions_dir / card_id
+        if not dest_dir.exists():
+            return []
+        return sorted(dest_dir.glob("*.json"), reverse=True)
+
     def card_path(self, card_id: str, payload: dict[str, Any] | None = None) -> Path:
         """Return the path to the card.json file for a given card."""
         book_dir = self._resolve_book_dir(card_id, payload)
@@ -167,16 +201,19 @@ class LocalLibrary:
             json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
-        # Update manifest
+        # Update manifest — preserve existing fields (e.g. source, pull_hash)
         rel_path = book_dir.relative_to(self.library_dir).as_posix()
-        manifest.setdefault("cards", {})[card_id] = {
+        existing = manifest.get("cards", {}).get(card_id, {})
+        existing.update({
             "title": resolve_title(payload),
             "path": rel_path,
             "updated_at": datetime.now(UTC).isoformat(),
-        }
+        })
+        manifest.setdefault("cards", {})[card_id] = existing
         if update_pull_hash:
             manifest["cards"][card_id]["pull_hash"] = content_hash(payload)
             manifest["cards"][card_id]["pulled_at"] = datetime.now(UTC).isoformat()
+            manifest["cards"][card_id].pop("source", None)
         self.save_manifest(manifest)
 
     def load_card(self, card_id: str) -> dict[str, Any] | None:
@@ -324,23 +361,14 @@ class LocalLibrary:
         removed_dupes: list[dict[str, str]] = []
         updated: list[dict[str, Any]] = []
 
-        def _word_set(text: str) -> set[str]:
-            text = text.lower()
-            text = text.replace("-", " ")
-            text = re.sub(r"[^\w\s]", "", text)
-            return set(text.split()) - {"the", "a", "an", "and", "of", "in", "on", "by"}
-
         def _is_dupe(imp_words: set[str], pull_title: str) -> tuple[bool, float]:
             """Check Jaccard overlap ≥ 0.5 OR subset match (min 2 words)."""
-            pull_words = _word_set(pull_title)
+            pull_words = word_set(pull_title)
             if not pull_words or not imp_words:
                 return False, 0.0
             overlap = len(imp_words & pull_words)
             union = len(imp_words | pull_words)
             jaccard = overlap / union if union else 0.0
-            # Subset: all import words appear in pulled title (or vice versa)
-            # Require at least 2 significant words to avoid false positives
-            # from generic single-word titles like "Collection"
             smaller = min(len(imp_words), len(pull_words))
             is_subset = smaller >= 2 and (imp_words <= pull_words or pull_words <= imp_words)
             return (jaccard >= 0.5 or is_subset), jaccard
@@ -371,7 +399,7 @@ class LocalLibrary:
             clean_title = parsed["title"]
 
             # 3. Check for duplicate against pulled library using clean title
-            imp_words = _word_set(clean_title)
+            imp_words = word_set(clean_title)
             best_score = 0.0
             best_pull_title = ""
             best_pull_id = ""
@@ -1060,16 +1088,8 @@ def _guess_format(ext: str) -> str:
     return mapping.get(ext.lower(), "mp3")
 
 
-def _normalise_for_dedup(title: str) -> str:
-    """Normalise a title for duplicate comparison.
-
-    Lowercases, strips punctuation, and collapses whitespace so that
-    "The Borrowers" matches "Borrowers, The" etc.
-    """
-    t = title.lower()
-    t = re.sub(r"[^\w\s]", "", t)
-    t = " ".join(t.split())
-    return t
+# Thin alias – kept for backward compatibility with callers inside this module.
+_normalise_for_dedup = normalize_title_for_dedup
 
 
 def _extract_id3_metadata(zf: "zipfile.ZipFile", entry: str) -> dict[str, Any]:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import hashlib
 import logging
 from typing import Any
 
@@ -227,12 +228,21 @@ class YotoClient:
     # Audio upload & transcoding
     # ------------------------------------------------------------------
 
-    async def get_upload_url(self) -> dict[str, Any]:
+    async def get_upload_url(self, *, sha256: str | None = None) -> dict[str, Any]:
         """Request a signed upload URL for an audio file.
 
-        Returns ``{"uploadUrl": "<url>", "uploadId": "<id>"}``.
+        When *sha256* is provided the API can short-circuit if the file
+        already exists server-side, returning a null ``uploadUrl`` but a
+        valid ``uploadId``.
+
+        Returns ``{"uploadUrl": "<url>"|None, "uploadId": "<id>"}``.
         """
-        data = await self.get_json("/media/transcode/audio/uploadUrl")
+        params: dict[str, str] = {}
+        if sha256:
+            params["sha256"] = sha256
+        data = await self.get_json(
+            "/media/transcode/audio/uploadUrl", params=params or None
+        )
         upload = data.get("upload", data)
         return {
             "uploadUrl": upload.get("uploadUrl"),
@@ -274,15 +284,23 @@ class YotoClient:
     async def upload_and_transcode(self, file_data: bytes, content_type: str) -> dict[str, Any]:
         """Upload an audio file and wait for transcoding.
 
+        Computes the SHA256 of *file_data* and passes it to the upload-URL
+        endpoint.  If the file already exists server-side the upload step
+        is skipped entirely (dedup).
+
         Returns the transcode result with ``transcodedSha256`` and
         ``transcodedInfo``.
         """
-        upload = await self.get_upload_url()
+        sha256 = hashlib.sha256(file_data).hexdigest()
+        upload = await self.get_upload_url(sha256=sha256)
         upload_url = upload["uploadUrl"]
         upload_id = upload["uploadId"]
 
         if upload_url is None:
-            raise YotoApiError("API returned null uploadUrl — file may already exist")
+            if upload_id:
+                logger.info("Audio already on server (SHA256 match), skipping upload")
+                return await self.poll_transcode(upload_id)
+            raise YotoApiError("API returned null uploadUrl and no uploadId")
 
         await self.upload_audio_file(upload_url, file_data, content_type)
         return await self.poll_transcode(upload_id)

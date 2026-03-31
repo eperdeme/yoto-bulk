@@ -111,6 +111,15 @@ def metadata_block(card: dict[str, Any]) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def ensure_metadata(card: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``metadata`` sub-dict, creating it if absent or non-dict."""
+    meta = card.get("metadata")
+    if not isinstance(meta, dict):
+        meta = {}
+        card["metadata"] = meta
+    return meta
+
+
 def resolve_card_id(card: dict[str, Any]) -> str:
     card_id = card.get("cardId") or card.get("contentId") or card.get("id")
     return str(card_id).strip() if card_id else ""
@@ -194,6 +203,26 @@ def normalize_title(value: str) -> str:
     """
     filtered = [char.lower() if char.isalnum() else " " for char in value]
     return " ".join("".join(filtered).split())
+
+
+_STOPWORDS = frozenset({"the", "a", "an", "and", "of", "in", "on", "by", "is", "not"})
+
+
+def word_set(text: str) -> set[str]:
+    """Lowercase word set for fuzzy/Jaccard matching, minus common stopwords."""
+    return set(normalize_title(text).split()) - _STOPWORDS
+
+
+def normalize_title_for_dedup(value: str) -> str:
+    """Normalize a title for exact-match deduplication.
+
+    Like ``normalize_title`` but also strips leading articles (the/a/an)
+    so that "The Borrowers" and "Borrowers" are treated as equal.
+    """
+    import re
+
+    t = normalize_title(value)
+    return re.sub(r"^(the|a|an)\s+", "", t)
 
 
 # ------------------------------------------------------------------

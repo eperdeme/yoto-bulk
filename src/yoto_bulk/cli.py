@@ -16,7 +16,7 @@ import typer
 from rich.console import Console
 from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
-from yoto_bulk.card_utils import normalize_title, resolve_author, resolve_card_id, resolve_title
+from yoto_bulk.card_utils import ensure_metadata, normalize_title, normalize_title_for_dedup, resolve_author, resolve_card_id, resolve_title
 from yoto_bulk.config import Settings
 from yoto_bulk.context import AppContext
 from yoto_bulk.library import LocalLibrary
@@ -25,6 +25,19 @@ from yoto_bulk.reconcile import LocalLibraryScanner, ReconcileService
 from yoto_bulk.yoto_client import YotoApiError
 
 T = TypeVar("T")
+
+
+def _make_progress(console: Console) -> Progress:
+    """Build a standard Rich progress bar used across all CLI commands."""
+    return Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    )
+
 
 app = typer.Typer(help="Bulk operations for Yoto libraries.")
 auth_app = typer.Typer(help="Authenticate with the Yoto API.")
@@ -306,10 +319,7 @@ def _update_local_card_metadata(
                 summary["results"].append(result)
                 continue
 
-            metadata = full_card_payload.get("metadata")
-            if not isinstance(metadata, dict):
-                metadata = {}
-                full_card_payload["metadata"] = metadata
+            metadata = ensure_metadata(full_card_payload)
 
             metadata["series"] = series_name
             metadata["sequence_number"] = result["sequence_number"]
@@ -474,14 +484,7 @@ async def _apply_series_suggestions(
     if not series_mapping:
         return summary
 
-    progress = Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        console=app_context.console,
-    )
+    progress = _make_progress(app_context.console)
 
     total_titles = sum(len(titles) for titles in series_mapping.values() if isinstance(titles, list))
     sorted_series = sorted(
@@ -560,14 +563,7 @@ async def _enrich_metadata_authors(app_context: AppContext) -> dict[str, Any]:
     if not candidates:
         return summary
 
-    progress = Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        console=app_context.console,
-    )
+    progress = _make_progress(app_context.console)
 
     with progress:
         task_id = progress.add_task("Enriching missing authors", total=len(candidates))
@@ -588,10 +584,7 @@ async def _enrich_metadata_authors(app_context: AppContext) -> dict[str, Any]:
                 continue
 
             try:
-                metadata = payload.get("metadata")
-                if not isinstance(metadata, dict):
-                    metadata = {}
-                    payload["metadata"] = metadata
+                metadata = ensure_metadata(payload)
                 metadata["author"] = guessed_author
 
                 lib.save_card(card_id, payload)
@@ -719,112 +712,31 @@ def auth_login(
 
     if should_listen:
         import threading
-        import time
         import webbrowser
 
-        listener_ready = threading.Event()
-        listener_result: dict[str, str] = {}
+        listener_result: dict[str, str] | None = None
         listener_error: list[BaseException] = []
 
-        def listen_for_callback() -> None:
-            parsed_redirect = urlparse(redirect_uri)
-            if parsed_redirect.scheme != "http" or parsed_redirect.hostname not in {"localhost", "127.0.0.1"}:
-                listener_ready.set()
-                return
-
-            import http.server
-            import socketserver
-
-            port = parsed_redirect.port or 80
-            callback_path = parsed_redirect.path or "/"
-            finished = threading.Event()
-
-            class CallbackHandler(http.server.BaseHTTPRequestHandler):
-                def do_GET(self) -> None:  # noqa: N802
-                    request = urlparse(self.path)
-                    logger.info(
-                        "Received OAuth callback request",
-                        extra={"request_path": request.path, "callback_path": callback_path},
-                    )
-                    if request.path != callback_path:
-                        self.send_response(404)
-                        self.end_headers()
-                        self.wfile.write(b"Not found")
-                        return
-
-                    params = parse_qs(request.query)
-                    listener_result["code"] = params.get("code", [""])[0]
-                    listener_result["state"] = params.get("state", [""])[0]
-                    listener_result["error"] = params.get("error", [""])[0]
-                    logger.info(
-                        "Captured OAuth callback payload",
-                        extra={
-                            "has_code": bool(listener_result.get("code")),
-                            "has_state": bool(listener_result.get("state")),
-                            "has_error": bool(listener_result.get("error")),
-                        },
-                    )
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/html; charset=utf-8")
-                    self.end_headers()
-                    self.wfile.write(
-                        b"<html><body><h1>Authentication complete</h1><p>You can close this window and return to the terminal.</p></body></html>"
-                    )
-                    finished.set()
-
-                def log_message(self, format: str, *args: object) -> None:  # noqa: A003
-                    return
-
-            class ReusableTCPServer(socketserver.TCPServer):
-                allow_reuse_address = True
-
-            logger.info(
-                "Starting OAuth callback listener",
-                extra={
-                    "redirect_uri": redirect_uri,
-                    "hostname": parsed_redirect.hostname,
-                    "port": port,
-                    "callback_path": callback_path,
-                    "timeout_seconds": 180.0,
-                },
-            )
+        def _run_listener() -> None:
+            nonlocal listener_result
             try:
-                with ReusableTCPServer((parsed_redirect.hostname, port), CallbackHandler) as server:
-                    server.timeout = 0.5
-                    listener_ready.set()
-                    logger.debug(
-                        "OAuth callback listener bound successfully",
-                        extra={"hostname": parsed_redirect.hostname, "port": port},
-                    )
-                    deadline = time.monotonic() + 180.0
-                    while time.monotonic() < deadline and not finished.is_set():
-                        server.handle_request()
-            except OSError as exc:
+                listener_result = _capture_oauth_callback(redirect_uri, timeout_seconds=180.0)
+            except typer.BadParameter as exc:
                 listener_error.append(exc)
-                listener_ready.set()
-                logger.exception(
-                    "OAuth callback listener failed to bind",
-                    extra={"hostname": parsed_redirect.hostname, "port": port},
-                )
-                return
-            finally:
-                logger.info(
-                    "OAuth callback listener stopped",
-                    extra={"received_callback": bool(listener_result), "redirect_uri": redirect_uri},
-                )
 
-        listener_thread = threading.Thread(target=listen_for_callback, daemon=True)
+        listener_thread = threading.Thread(target=_run_listener, daemon=True)
         listener_thread.start()
-        listener_ready.wait(timeout=5.0)
+
+        # Give the listener a moment to bind before opening the browser
+        import time
+        time.sleep(0.5)
         if listener_error:
-            raise typer.BadParameter(
-                f"Could not listen for OAuth callback on {urlparse(redirect_uri).hostname}:{urlparse(redirect_uri).port or 80}: {listener_error[0]}"
-            ) from listener_error[0]
+            raise listener_error[0]
 
         logger.info("Opening browser for OAuth login", extra={"redirect_uri": redirect_uri})
         webbrowser.open(bootstrap.authorize_url)
         listener_thread.join()
-        callback_payload = listener_result or None
+        callback_payload = listener_result
     elif open_browser:
         import webbrowser
 
@@ -946,13 +858,23 @@ def reconcile_compare(ctx: typer.Context) -> None:
     local_items = scanner.scan(app_context.settings.audiobook_dir)
     yoto_books = run_async_command(app_context.yoto.list_library_books(), app_context.console)
     matches = reconciler.reconcile(local_items=local_items, yoto_books=yoto_books)
-    missing = [match for match in matches if match.yoto_book is None]
+    missing = [m for m in matches if m.yoto_book is None]
+    matched = [m for m in matches if m.yoto_book is not None]
     app_context.console.print(
         {
             "local_count": len(local_items),
             "yoto_count": len(yoto_books),
-            "matched_count": len(matches) - len(missing),
-            "missing_on_yoto": [match.local_item.stem for match in missing[:20]],
+            "matched_count": len(matched),
+            "matched": [
+                {
+                    "local": m.local_item.stem,
+                    "yoto_title": m.yoto_book.title,
+                    "confidence": m.confidence,
+                    "reason": m.reason,
+                }
+                for m in matched
+            ],
+            "missing_on_yoto": [m.local_item.stem for m in missing],
         }
     )
 
@@ -989,14 +911,7 @@ async def _pull_library(app_context: AppContext, *, download_media: bool = True)
         "results": [],
     }
 
-    progress = Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        console=app_context.console,
-    )
+    progress = _make_progress(app_context.console)
 
     sem = asyncio.Semaphore(6)
 
@@ -1047,6 +962,53 @@ async def _pull_library(app_context: AppContext, *, download_media: bool = True)
     return summary
 
 
+# ------------------------------------------------------------------
+# Audio normalization helpers
+# ------------------------------------------------------------------
+
+
+def _ffmpeg_available() -> bool:
+    """Return True if ffmpeg is on PATH."""
+    return shutil.which("ffmpeg") is not None
+
+
+def _normalize_audio_file(input_path: Path, output_dir: Path) -> Path | None:
+    """Normalize an audio file using ffmpeg's loudnorm filter (EBU R128).
+
+    Writes the normalized version into *output_dir* and returns the path.
+    Returns ``None`` on failure so callers can fall back to the original.
+    """
+    import subprocess
+
+    output_path = output_dir / input_path.name
+    codec_map = {
+        ".mp3": "libmp3lame",
+        ".m4a": "aac",
+        ".ogg": "libvorbis",
+        ".flac": "flac",
+        ".wav": "pcm_s16le",
+        ".aac": "aac",
+        ".opus": "libopus",
+    }
+    codec = codec_map.get(input_path.suffix.lower(), "libmp3lame")
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(input_path),
+        "-af", "loudnorm=I=-23:TP=-1:LRA=11",
+        "-acodec", codec,
+        "-b:a", "128k",
+        str(output_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode == 0 and output_path.exists():
+            return output_path
+        logger.warning("ffmpeg normalization failed for %s: %s", input_path.name, result.stderr[:200])
+    except Exception as exc:
+        logger.warning("ffmpeg normalization error for %s: %s", input_path.name, exc)
+    return None
+
+
 async def _upload_audio_for_card(
     yoto_client: Any,
     lib: LocalLibrary,
@@ -1055,11 +1017,19 @@ async def _upload_audio_for_card(
     progress: Progress,
     task_id: Any,
     title: str,
+    *,
+    normalize: bool = True,
 ) -> dict[str, Any]:
     """Upload local audio files and fill in trackUrl/duration/fileSize/channels/format.
 
+    When *normalize* is ``True`` and ffmpeg is available, audio files are
+    volume-normalized (EBU R128, -23 LUFS) before upload for consistent
+    playback across cards.
+
     Mutates *payload* in-place. Returns the payload with all tracks populated.
     """
+    import tempfile
+
     audio_files = lib.audio_files_for_card(card_id)
     chapters = payload.get("content", {}).get("chapters", [])
 
@@ -1077,25 +1047,45 @@ async def _upload_audio_for_card(
         ".aac": "audio/aac",
     }
 
-    for idx, (audio_path, chapter) in enumerate(zip(audio_files, chapters)):
-        track = chapter.get("tracks", [{}])[0]
-        # Skip if trackUrl already populated (re-push scenario)
-        if track.get("trackUrl") and track["trackUrl"] != "":
-            continue
+    # Optionally normalize audio into a temp directory
+    temp_dir: Path | None = None
+    upload_files = list(audio_files)
+    do_normalize = normalize and _ffmpeg_available()
 
-        progress.update(task_id, description=f"Uploading {title} ({idx + 1}/{len(audio_files)})")
+    if do_normalize:
+        temp_dir = Path(tempfile.mkdtemp(prefix="yoto-norm-"))
+        for idx, audio_path in enumerate(audio_files):
+            progress.update(
+                task_id,
+                description=f"Normalizing {title} ({idx + 1}/{len(audio_files)})",
+            )
+            normalized = _normalize_audio_file(audio_path, temp_dir)
+            if normalized:
+                upload_files[idx] = normalized
 
-        content_type = mime_map.get(audio_path.suffix.lower(), "audio/mpeg")
-        file_data = audio_path.read_bytes()
+    try:
+        for idx, (upload_path, chapter) in enumerate(zip(upload_files, chapters)):
+            track = chapter.get("tracks", [{}])[0]
+            # Skip if trackUrl already populated (re-push scenario)
+            if track.get("trackUrl") and track["trackUrl"] != "":
+                continue
 
-        transcode = await yoto_client.upload_and_transcode(file_data, content_type)
-        info = transcode.get("transcodedInfo", {})
+            progress.update(task_id, description=f"Uploading {title} ({idx + 1}/{len(audio_files)})")
 
-        track["trackUrl"] = f"yoto:#{transcode['transcodedSha256']}"
-        track["duration"] = info.get("duration", 0)
-        track["fileSize"] = info.get("fileSize", 0)
-        track["channels"] = info.get("channels", "stereo")
-        track["format"] = info.get("format", audio_path.suffix.lstrip("."))
+            content_type = mime_map.get(upload_path.suffix.lower(), "audio/mpeg")
+            file_data = upload_path.read_bytes()
+
+            transcode = await yoto_client.upload_and_transcode(file_data, content_type)
+            info = transcode.get("transcodedInfo", {})
+
+            track["trackUrl"] = f"yoto:#{transcode['transcodedSha256']}"
+            track["duration"] = info.get("duration", 0)
+            track["fileSize"] = info.get("fileSize", 0)
+            track["channels"] = info.get("channels", "stereo")
+            track["format"] = info.get("format", upload_path.suffix.lstrip("."))
+    finally:
+        if temp_dir and temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     return payload
 
@@ -1129,8 +1119,19 @@ async def _upload_cover_for_card(
     payload.setdefault("metadata", {}).setdefault("cover", {})["imageL"] = media_url
 
 
-async def _push_library(app_context: AppContext) -> dict[str, Any]:
-    """Push locally modified and imported cards back to the Yoto API."""
+async def _push_library(
+    app_context: AppContext,
+    *,
+    normalize: bool = True,
+    max_concurrent: int = 3,
+) -> dict[str, Any]:
+    """Push locally modified and imported cards back to the Yoto API.
+
+    Creates a timestamped backup of every card before pushing.  Imported
+    cards can optionally have their audio normalized (default on when
+    ffmpeg is available).  Up to *max_concurrent* cards are uploaded in
+    parallel for faster bulk pushes.
+    """
     lib = app_context.library
     yoto_client = app_context.yoto
     modified = lib.modified_cards()
@@ -1152,35 +1153,29 @@ async def _push_library(app_context: AppContext) -> dict[str, Any]:
     if not all_cards:
         return summary
 
-    progress = Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        console=app_context.console,
-    )
+    # Backup every card before pushing
+    for card_id, _, _, _ in all_cards:
+        lib.backup_card(card_id)
 
-    with progress:
-        task_id = progress.add_task("Pushing changes", total=len(all_cards))
-        for card_id, payload, title, source in all_cards:
-            progress.update(task_id, description=f"Pushing {title}")
+    progress = _make_progress(app_context.console)
+    semaphore = asyncio.Semaphore(max_concurrent)
 
+    async def _push_one(
+        card_id: str, payload: dict[str, Any], title: str, source: str, task_id: Any,
+    ) -> dict[str, Any]:
+        async with semaphore:
             if app_context.dry_run:
                 audio_count = len(lib.audio_files_for_card(card_id)) if source == "imported" else 0
-                summary["pushed"] += 1
-                summary["results"].append({
+                progress.advance(task_id)
+                return {
                     "card_id": card_id,
                     "title": title,
                     "source": source,
                     "status": "dry_run",
                     "audio_files_to_upload": audio_count,
-                })
-                progress.advance(task_id)
-                continue
+                }
 
             try:
-                # Enrich icons and upload cover for all cards
                 from yoto_bulk.card_utils import enrich_payload_icons
                 enrich_payload_icons(payload)
 
@@ -1188,48 +1183,65 @@ async def _push_library(app_context: AppContext) -> dict[str, Any]:
                     yoto_client, lib, card_id, payload, progress, task_id, title,
                 )
 
-                # For imported cards, upload audio files first
                 if source == "imported":
                     await _upload_audio_for_card(
                         yoto_client, lib, card_id, payload, progress, task_id, title,
+                        normalize=normalize,
                     )
 
-                # For imported cards, strip the temp ID so the API creates a new card
                 push_payload = payload.copy()
                 if source == "imported" and card_id.startswith("import-"):
                     push_payload.pop("cardId", None)
 
-                progress.update(task_id, description=f"Creating {title}")
+                progress.update(task_id, description=f"Saving {title}")
                 result = await yoto_client.save_content(push_payload)
 
-                # The API returns the real cardId for newly created cards
                 new_card = result.get("card", result)
                 real_id = new_card.get("cardId") or new_card.get("contentId") or card_id
 
                 if source == "imported" and real_id != card_id:
-                    # Rename locally to the real API-assigned cardId, preserving media
                     payload["cardId"] = real_id
                     lib.rename_card(card_id, real_id, payload)
                 else:
                     lib.save_card(card_id, payload, update_pull_hash=True)
 
-                summary["pushed"] += 1
-                summary["results"].append({
+                progress.advance(task_id)
+                return {
                     "card_id": real_id,
                     "title": title,
                     "source": source,
                     "status": "pushed",
                     "old_id": card_id if real_id != card_id else None,
-                })
+                }
             except Exception as exc:
                 logger.warning(
                     "Failed to push card",
                     extra={"card_id": card_id, "title": title, "error": str(exc)},
                 )
-                summary["failed"] += 1
-                summary["results"].append({"card_id": card_id, "title": title, "source": source, "status": "failed", "error": str(exc)})
+                progress.advance(task_id)
+                return {
+                    "card_id": card_id,
+                    "title": title,
+                    "source": source,
+                    "status": "failed",
+                    "error": str(exc),
+                }
 
-            progress.advance(task_id)
+    with progress:
+        task_id = progress.add_task("Pushing changes", total=len(all_cards))
+        results = await asyncio.gather(
+            *[
+                _push_one(cid, payload, title, source, task_id)
+                for cid, payload, title, source in all_cards
+            ],
+        )
+
+    for r in results:
+        summary["results"].append(r)
+        if r.get("status") in ("pushed", "dry_run"):
+            summary["pushed"] += 1
+        else:
+            summary["failed"] += 1
 
     return summary
 
@@ -1251,13 +1263,29 @@ def library_pull(
 
 
 @library_app.command("push")
-def library_push(ctx: typer.Context) -> None:
-    """Push locally modified cards back to Yoto. Use --apply to persist."""
+def library_push(
+    ctx: typer.Context,
+    normalize: Annotated[
+        bool,
+        typer.Option(
+            "--normalize/--no-normalize",
+            help="Normalize audio volume (EBU R128) before upload. Requires ffmpeg.",
+        ),
+    ] = True,
+) -> None:
+    """Push locally modified cards back to Yoto. Use --apply to persist.
+
+    Audio files for imported cards are volume-normalized by default when
+    ffmpeg is available, ensuring consistent playback across all cards.
+    Use --no-normalize to skip this step.
+    """
     app_context = get_context(ctx)
     lib = app_context.library
     if not lib.manifest_path.exists():
         raise typer.BadParameter("No local library found. Run `library pull` first.")
-    summary = run_async_command(_push_library(app_context), app_context.console)
+    summary = run_async_command(
+        _push_library(app_context, normalize=normalize), app_context.console
+    )
     app_context.console.print(summary)
 
 
@@ -1298,8 +1326,11 @@ def library_import(
     """Import audiobook zip files into the local library.
 
     Supports Yoto export zips (containing card-data.json) and raw audio zips
-    (MP3/M4A files from publishers). Use ``library push`` afterwards to upload
-    to Yoto.
+    (MP3/M4A files from publishers).
+
+    Automatically checks for duplicates against the remote Yoto library and
+    enriches missing authors via OpenAI (when configured). Use ``library push``
+    afterwards to upload to Yoto.
     """
     from pathlib import Path as P
 
@@ -1317,6 +1348,15 @@ def library_import(
     else:
         raise typer.BadParameter(f"Not a zip file or directory: {target}")
 
+    # Fetch remote library for dedup (one API call for the whole batch)
+    remote_titles: dict[str, str] = {}
+    try:
+        yoto_books = run_async_command(app_context.yoto.list_library_books(), app_context.console)
+        remote_titles = {normalize_title_for_dedup(b.title): b.title for b in yoto_books}
+        logger.info("Loaded %d remote titles for dedup", len(remote_titles))
+    except Exception as exc:
+        logger.warning("Could not fetch remote library for dedup: %s", exc)
+
     results: list[dict[str, Any]] = []
     for zip_path in zips:
         try:
@@ -1326,11 +1366,46 @@ def library_import(
             logger.warning("Failed to import %s: %s", zip_path.name, exc)
             results.append({"file": zip_path.name, "status": "failed", "error": str(exc)})
 
+    # Post-import enrichment for successfully imported cards
     imported = [r for r in results if r.get("status") == "imported"]
+
+    for result in imported:
+        card_id = result["card_id"]
+        card_title = result["title"]
+
+        # Remote dedup: if title matches a remote card, remove the import
+        normalized = normalize_title_for_dedup(card_title)
+        remote_match = remote_titles.get(normalized)
+        if remote_match:
+            logger.info("Removing duplicate import '%s' (matches remote '%s')", card_title, remote_match)
+            lib.remove_card(card_id)
+            result["status"] = "skipped"
+            result["reason"] = "duplicate_on_yoto"
+            result["remote_title"] = remote_match
+            continue
+
+        # Author enrichment: guess via LLM if missing and API key is configured
+        if not result.get("author") and app_context.settings.openai_api_key:
+            try:
+                guessed = app_context.llm.guess_author(card_title)
+                payload = lib.load_card(card_id)
+                if payload:
+                    payload.setdefault("metadata", {})["author"] = guessed
+                    lib.save_card(card_id, payload)
+                    result["author"] = guessed
+                    result["author_source"] = "llm"
+                    logger.info("Enriched author for '%s': %s", card_title, guessed)
+            except Exception as exc:
+                logger.warning("Author enrichment failed for '%s': %s", card_title, exc)
+                result["author_enrichment_error"] = str(exc)
+
+    successfully_imported = [r for r in results if r.get("status") == "imported"]
     failed = [r for r in results if r.get("status") == "failed"]
+    skipped = [r for r in results if r.get("status") == "skipped"]
     app_context.console.print({
         "total_zips": len(zips),
-        "imported": len(imported),
+        "imported": len(successfully_imported),
+        "skipped": len(skipped),
         "failed": len(failed),
         "results": results,
     })
@@ -1398,14 +1473,7 @@ async def _recover_covers(app_context: AppContext, card_ids: list[str] | None = 
     if not candidates:
         return summary
 
-    progress = Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        console=app_context.console,
-    )
+    progress = _make_progress(app_context.console)
 
     with progress:
         task_id = progress.add_task("Recovering covers", total=len(candidates))
@@ -1648,14 +1716,7 @@ def _tag_series_descriptions(app_context: AppContext) -> dict[str, Any]:
         "results": [],
     }
 
-    progress = Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        console=app_context.console,
-    )
+    progress = _make_progress(app_context.console)
 
     with progress:
         task_id = progress.add_task("Tagging series descriptions", total=len(all_cards))
@@ -1676,10 +1737,7 @@ def _tag_series_descriptions(app_context: AppContext) -> dict[str, Any]:
             series_name, sequence_number = lookup
             series_tag = f"Series: {series_name} | Book: {sequence_number}"
 
-            metadata = payload.get("metadata")
-            if not isinstance(metadata, dict):
-                metadata = {}
-                payload["metadata"] = metadata
+            metadata = ensure_metadata(payload)
 
             full_description = metadata.get("description") or ""
             if series_tag in full_description:

@@ -206,6 +206,7 @@ class LlmService:
             3. If a book belongs to a known, real-world series, put it in the 'series' output under the official series name, EVEN IF it is the only book from that series in this list.
             4. Order books chronologically within their series if you know the reading order. Use sequence_number only as a hint.
             5. The 'unmatched' array is strictly for true standalone books. If a book has sequels or prequels in the real world, it MUST go into a series.
+            6. The 'existing_series' field is metadata from third-party providers and is OFTEN WRONG. In particular, treat genre-like values such as "Children", "Children's", "Kids", "Juvenile", "Fiction", "Audiobook" as bogus and IGNORE them — replace with the correct official series name when the book actually belongs to a known series, or move the book to 'unmatched' if it is a standalone.
 
             Library entries to process:
             {json.dumps(library_entries, indent=2, ensure_ascii=False)}

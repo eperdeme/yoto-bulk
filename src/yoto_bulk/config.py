@@ -13,7 +13,7 @@ def default_data_dir() -> Path:
 
 
 class Settings(BaseSettings):
-    """Runtime settings for the Yoto bulk CLI."""
+    """Shared runtime settings for Yoto service helpers."""
 
     model_config = SettingsConfigDict(
         env_prefix="YOTO_BULK_",
@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     audiobook_dir: Path | None = Field(default=None)
     data_dir: Path = Field(default_factory=default_data_dir)
     request_timeout_seconds: float = Field(default=30.0)
+    yoto_transcode_timeout_seconds: float = Field(default=600.0)
+    yoto_transcode_poll_interval_seconds: float = Field(default=2.0)
     max_family_groups: int = Field(default=20)
     log_level: str = Field(default="INFO")
 
@@ -46,10 +48,6 @@ class Settings(BaseSettings):
     @property
     def library_dir(self) -> Path:
         return self.data_dir / "library"
-
-    @property
-    def series_suggestions_path(self) -> Path:
-        return self.cache_dir / "series_suggestions.json"
 
     def ensure_directories(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)

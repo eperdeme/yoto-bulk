@@ -8,3 +8,12 @@ dist/
 build/
 .DS_Store
 tokens.json
+zip-archive/
+
+# Redis snapshots. These contain live cache contents — and would contain
+# library credentials if those ever move from env into the store.
+*.rdb
+dump.rdb
+node_modules/
+test-results/
+playwright-report/

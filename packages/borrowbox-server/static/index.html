@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Audiobook pipeline</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <a href="#view" class="skip-link">Skip to content</a>
+
+  <div class="shell">
+    <!-- Persistent rail. Replaces six sibling tabs: these are places, and each
+         carries a live count so the work is visible without navigating. -->
+    <nav class="rail" aria-label="Sections">
+      <div class="rail-brand">
+        <span class="rail-logo" aria-hidden="true">◍</span>
+        <span class="rail-brand-text">Audiobooks</span>
+      </div>
+
+      <ul class="rail-nav" role="list">
+        <li>
+          <a class="rail-item" href="#/today" data-route="today">
+            <span class="rail-icon" aria-hidden="true">◎</span>
+            <span class="rail-label">Today</span>
+            <span class="rail-count" data-count="today" hidden></span>
+          </a>
+        </li>
+        <li>
+          <a class="rail-item" href="#/find" data-route="find">
+            <span class="rail-icon" aria-hidden="true">⌕</span>
+            <span class="rail-label">Find</span>
+          </a>
+        </li>
+        <li>
+          <a class="rail-item" href="#/shelf" data-route="shelf">
+            <span class="rail-icon" aria-hidden="true">▤</span>
+            <span class="rail-label">Shelf</span>
+            <span class="rail-count" data-count="shelf" hidden></span>
+          </a>
+        </li>
+        <li class="rail-secondary">
+          <a class="rail-item" href="#/series" data-route="series">
+            <span class="rail-icon" aria-hidden="true">⋮⋮</span>
+            <span class="rail-label">Series</span>
+            <span class="rail-count" data-count="series" hidden></span>
+          </a>
+        </li>
+        <li class="rail-secondary">
+          <a class="rail-item" href="#/history" data-route="history">
+            <span class="rail-icon" aria-hidden="true">↺</span>
+            <span class="rail-label">History</span>
+          </a>
+        </li>
+        <li class="rail-secondary">
+          <a class="rail-item" href="#/purchased" data-route="purchased">
+            <span class="rail-icon" aria-hidden="true">◈</span>
+            <span class="rail-label">Purchased</span>
+            <span class="rail-count" data-count="purchased" hidden></span>
+          </a>
+        </li>
+        <li class="rail-secondary">
+          <a class="rail-item" href="#/settings" data-route="settings">
+            <span class="rail-icon" aria-hidden="true">⚙</span>
+            <span class="rail-label">Settings</span>
+          </a>
+        </li>
+        <li class="mobile-more">
+          <details id="nav-more">
+            <summary class="rail-item">More</summary>
+            <div class="mobile-menu">
+              <a class="rail-item" href="#/series" data-route="series">Series</a>
+              <a class="rail-item" href="#/history" data-route="history">History</a>
+              <a class="rail-item" href="#/purchased" data-route="purchased">Purchased</a>
+              <a class="rail-item" href="#/settings" data-route="settings">Settings</a>
+            </div>
+          </details>
+        </li>
+      </ul>
+
+      <div class="rail-foot">
+        <button type="button" class="btn btn-ghost btn-block" id="refresh-all" aria-label="Refresh view" title="Refresh view">Refresh view</button>
+        <p class="rail-meta" id="last-updated" aria-live="polite"></p>
+      </div>
+    </nav>
+
+    <main class="view" id="view" tabindex="-1">
+      <div id="view-root"></div>
+    </main>
+  </div>
+
+  <!-- Single detail panel. Replaces the six separate modals: one book, one
+       place to see its whole pipeline state and act on it. -->
+  <div class="drawer-scrim" id="drawer-scrim" hidden></div>
+  <aside class="drawer" id="drawer" role="dialog" aria-modal="true"
+         aria-labelledby="drawer-title" hidden>
+    <header class="drawer-head">
+      <h2 class="drawer-title" id="drawer-title">Details</h2>
+      <button type="button" class="btn btn-icon" id="drawer-close" aria-label="Close details">✕</button>
+    </header>
+    <div class="drawer-body" id="drawer-body"></div>
+    <footer class="drawer-actions" id="drawer-actions"></footer>
+  </aside>
+
+  <!-- Long-running work. Lives outside #view-root so a data refresh cannot
+       destroy it mid-flight. -->
+  <section class="tasks" id="tasks" aria-label="Background tasks" hidden></section>
+
+  <div class="toasts" id="toasts" role="region" aria-label="Notifications"></div>
+  <div class="sr-only" id="live" role="status" aria-live="polite"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

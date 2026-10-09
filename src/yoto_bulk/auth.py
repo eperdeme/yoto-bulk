@@ -1,11 +1,10 @@
-"""OAuth helpers for headless CLI authentication."""
+"""OAuth token helpers shared by the Yoto web service."""
 
 from __future__ import annotations
 
 import json
 import os
 import secrets
-import webbrowser
 from base64 import urlsafe_b64encode
 from dataclasses import dataclass
 from hashlib import sha256
@@ -128,11 +127,6 @@ class YotoAuthService:
             authorize_url=f"{self.settings.yoto_auth_base_url}/authorize?{query}",
             state=state,
         )
-
-    def open_browser_login(self, redirect_uri: str, scope: str = "profile offline_access") -> OAuthBootstrap:
-        bootstrap = self.build_authorize_url(redirect_uri=redirect_uri, scope=scope)
-        webbrowser.open(bootstrap.authorize_url)
-        return bootstrap
 
     async def exchange_code(self, code: str, redirect_uri: str) -> OAuthTokenSet:
         if not self.settings.yoto_client_id:

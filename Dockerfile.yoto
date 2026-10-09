@@ -1,0 +1,27 @@
+FROM python:3.13-slim
+
+# Install uv for fast dependency resolution
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# Copy workspace definition
+COPY pyproject.toml uv.lock README.md ./
+COPY packages/yoto-server/pyproject.toml packages/yoto-server/pyproject.toml
+COPY packages/yoto-server/README.md packages/yoto-server/README.md
+
+# Copy source packages
+COPY src src
+COPY packages/borrowbox/pyproject.toml packages/borrowbox/pyproject.toml
+COPY packages/borrowbox/README.md packages/borrowbox/README.md
+COPY packages/borrowbox/src packages/borrowbox/src
+COPY packages/yoto-server/src packages/yoto-server/src
+
+# Install dependencies
+RUN uv sync --package yoto-server --no-dev --frozen
+
+ENV PATH="/app/.venv/bin:$PATH"
+
+EXPOSE 8001
+
+CMD ["yoto-server"]

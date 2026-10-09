@@ -1,0 +1,53 @@
+services:
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis-data:/data
+    command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  server:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      BORROWBOX_REDIS_URL: redis://redis:6379/0
+      BORROWBOX_HOST: "0.0.0.0"
+      BORROWBOX_PORT: "8000"
+      BORROWBOX_YOTO_LIBRARY_DIR: /yoto-library
+      YOTO_BULK_DATA_DIR: /yoto-data
+    volumes:
+      - ${HOME}/.config/yoto-bulk/library:/yoto-library
+      - ${HOME}/.config/yoto-bulk:/yoto-data:ro
+      - ./zip-archive:/zip-archive
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  yoto-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.yoto
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    environment:
+      YOTO_BULK_YOTO_SERVER_HOST: "0.0.0.0"
+      YOTO_BULK_YOTO_SERVER_PORT: "8001"
+      YOTO_BULK_REDIS_URL: redis://redis:6379/0
+      YOTO_BULK_DATA_DIR: /yoto-data
+    volumes:
+      - ${HOME}/.config/yoto-bulk:/yoto-data
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis-data:

@@ -1,16 +1,15 @@
 [project]
 name = "yoto-bulk"
 version = "0.1.0"
-description = "CLI for bulk operations against a Yoto library"
+description = "Shared domain helpers for the Yoto/BorrowBox web services"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "borrowbox",
   "httpx>=0.28.1",
   "pydantic>=2.11.3",
   "pydantic-settings>=2.8.1",
-  "rich>=14.0.0",
   "tenacity>=9.1.2",
-  "typer>=0.15.2",
   "openai>=1.72.0",
   "mutagen>=1.47.0",
 ]
@@ -21,15 +20,19 @@ dev = [
   "ruff>=0.11.4",
 ]
 
-[project.scripts]
-yoto-bulk = "yoto_bulk.cli:app"
-
 [build-system]
 requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [tool.uv]
 package = true
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+borrowbox = { workspace = true }
+yoto-bulk = { workspace = true }
 
 [tool.ruff]
 line-length = 100
@@ -38,3 +41,7 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.pytest.ini_options]
+markers = [
+  "e2e: opt-in end-to-end tests against running services and real credentials",
+]

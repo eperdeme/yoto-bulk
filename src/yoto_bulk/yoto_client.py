@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from yoto_bulk.workflows import report_workflow
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import hashlib
@@ -56,7 +57,7 @@ class YotoClient:
         token_set = self.auth_service.token_store.load()
         if token_set is None:
             raise YotoApiError(
-                "No saved OAuth tokens. Run `yoto-bulk auth login` to authenticate."
+                "No saved OAuth tokens. Configure Yoto OAuth tokens before calling the Yoto API."
             )
 
         headers = self._headers(token_set)
@@ -95,8 +96,8 @@ class YotoClient:
     # ------------------------------------------------------------------
 
     async def _handle_response(self, response: httpx.Response, client: httpx.AsyncClient) -> None:
-        """Handle 401 (refresh + retry) and 429 (rate limit) before raise_for_status."""
-        if response.status_code == 401:
+        """Handle 401/403 (refresh + retry) and 429 (rate limit) before raise_for_status."""
+        if response.status_code in (401, 403):
             new_tokens = await self.auth_service.refresh_access_token()
             client.headers["Authorization"] = f"Bearer {new_tokens.access_token}"
             raise YotoApiError("Token refreshed, retrying request")
@@ -218,11 +219,27 @@ class YotoClient:
         return card
 
     async def save_content(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist a full content payload back to the Yoto API."""
-        from yoto_bulk.card_utils import truncate_for_api
+        """Persist a full content payload back to the Yoto API.
+
+        Applies ``truncate_for_api`` to the original payload (for local
+        storage limits) then ``sanitize_for_yoto_api`` to produce a clean
+        copy with only Yoto-valid fields before posting.
+        """
+        from yoto_bulk.card_utils import sanitize_for_yoto_api, truncate_for_api
 
         truncate_for_api(payload)
-        return await self.post_json("/content", payload)
+        api_payload = sanitize_for_yoto_api(payload)
+        return await self.post_json("/content", api_payload)
+
+    async def delete_content(self, card_id: str) -> None:
+        """Delete a MYO card from the Yoto API.
+
+        ``DELETE /content/{cardId}`` — only works for user-created MYO cards.
+        """
+        async with self.session() as client:
+            response = await client.delete(f"/content/{card_id}")
+            await self._handle_response(response, client)
+            response.raise_for_status()
 
     # ------------------------------------------------------------------
     # Audio upload & transcoding
@@ -256,10 +273,39 @@ class YotoClient:
                 upload_url,
                 content=file_data,
                 headers={"Content-Type": content_type},
+                extensions={"expect_header": False},
             )
             resp.raise_for_status()
 
-    async def poll_transcode(self, upload_id: str, *, max_attempts: int = 180) -> dict[str, Any]:
+    async def upload_audio_stream(
+        self,
+        upload_url: str,
+        stream: AsyncIterator[bytes],
+        content_type: str,
+        content_length: int | None = None,
+    ) -> None:
+        """PUT raw audio stream to the signed upload URL."""
+        headers = {"Content-Type": content_type}
+        if content_length is not None:
+            headers["Content-Length"] = str(content_length)
+
+        async with httpx.AsyncClient(timeout=600) as client:
+            resp = await client.put(
+                upload_url,
+                content=stream,
+                headers=headers,
+                extensions={"expect_header": False},
+            )
+            resp.raise_for_status()
+
+    async def poll_transcode(
+        self,
+        upload_id: str,
+        *,
+        timeout_seconds: float | None = None,
+        poll_interval_seconds: float | None = None,
+        max_attempts: int | None = None,
+    ) -> dict[str, Any]:
         """Poll until transcoding completes, returning transcode info.
 
         Returns a dict with ``transcodedSha256`` and ``transcodedInfo``
@@ -267,7 +313,20 @@ class YotoClient:
 
         Raises :class:`YotoApiError` on timeout.
         """
-        for attempt in range(max_attempts):
+        interval = poll_interval_seconds
+        if interval is None:
+            interval = getattr(self.settings, "yoto_transcode_poll_interval_seconds", 2.0)
+        timeout = timeout_seconds
+        if timeout is None:
+            if max_attempts is not None:
+                timeout = max_attempts * interval
+            else:
+                timeout = getattr(self.settings, "yoto_transcode_timeout_seconds", 600.0)
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        await report_workflow("Transcoding audio")
+        while True:
             try:
                 data = await self.get_json(
                     f"/media/upload/{upload_id}/transcoded",
@@ -278,8 +337,12 @@ class YotoClient:
                     return transcode
             except Exception:
                 pass
-            await asyncio.sleep(1)
-        raise YotoApiError(f"Transcoding timed out after {max_attempts}s for upload {upload_id}")
+
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(interval, remaining))
+        raise YotoApiError(f"Transcoding timed out after {timeout:.1f}s for upload {upload_id}")
 
     async def upload_and_transcode(self, file_data: bytes, content_type: str) -> dict[str, Any]:
         """Upload an audio file and wait for transcoding.
@@ -303,6 +366,34 @@ class YotoClient:
             raise YotoApiError("API returned null uploadUrl and no uploadId")
 
         await self.upload_audio_file(upload_url, file_data, content_type)
+        return await self.poll_transcode(upload_id)
+
+    async def upload_stream_and_transcode(
+        self,
+        stream: AsyncIterator[bytes],
+        content_type: str,
+        sha256: str | None = None,
+        content_length: int | None = None,
+    ) -> dict[str, Any]:
+        """Upload an audio stream and wait for transcoding.
+
+        If *sha256* is provided, the API can short-circuit if the file
+        already exists server-side (dedup).
+        """
+        upload = await self.get_upload_url(sha256=sha256)
+        upload_url = upload["uploadUrl"]
+        upload_id = upload["uploadId"]
+
+        if upload_url is None:
+            if upload_id:
+                logger.info("Audio already on server (SHA256 match), skipping upload")
+                return await self.poll_transcode(upload_id)
+            raise YotoApiError("API returned null uploadUrl and no uploadId")
+
+        await report_workflow("Uploading audio")
+        await self.upload_audio_stream(
+            upload_url, stream, content_type, content_length=content_length
+        )
         return await self.poll_transcode(upload_id)
 
     async def upload_cover_image(self, file_data: bytes, content_type: str) -> str:

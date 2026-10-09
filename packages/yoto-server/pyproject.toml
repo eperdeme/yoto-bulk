@@ -1,0 +1,35 @@
+[project]
+name = "yoto-server"
+version = "0.1.0"
+description = "FastAPI service for Yoto card library management"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "yoto-bulk",
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.34.0",
+  "pydantic>=2.11.0",
+  "pydantic-settings>=2.8.0",
+  "redis[hiredis]>=5.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.5",
+  "httpx>=0.28.1",
+  "ruff>=0.11.4",
+]
+
+[project.scripts]
+yoto-server = "yoto_server.main:run"
+
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -18,7 +18,6 @@ import httpx
 
 from yoto_bulk.card_utils import (
     card_to_yoto_book,
-    normalize_title,
     normalize_title_for_dedup,
     resolve_author,
     resolve_authors,
@@ -489,7 +488,7 @@ class LocalLibrary:
         audio_dir = self.library_dir / entry["path"] / "audio"
         if not audio_dir.is_dir():
             return []
-        exts = {".mp3", ".m4a", ".ogg", ".wav", ".flac", ".aac"}
+        exts = {".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac", ".aac"}
         return sorted(f for f in audio_dir.iterdir() if f.suffix.lower() in exts)
 
     def cover_file_for_card(self, card_id: str) -> Path | None:
@@ -687,7 +686,13 @@ class LocalLibrary:
     # Zip import
     # ------------------------------------------------------------------
 
-    def import_from_zip(self, zip_path: Path, title: str | None = None) -> dict[str, Any]:
+    def import_from_zip(
+        self,
+        zip_path: Path,
+        title: str | None = None,
+        *,
+        include_id3_description: bool = True,
+    ) -> dict[str, Any]:
         """Import an audiobook zip file into the local library.
 
         Supports two zip formats:
@@ -711,7 +716,7 @@ class LocalLibrary:
             if card_data_entry:
                 return self._import_yoto_export(zf, names, card_data_entry)
             else:
-                return self._import_raw_audio(zf, names, zip_path, title)
+                return self._import_raw_audio(zf, names, zip_path, title, include_id3_description=include_id3_description)
 
     def _find_existing_by_title(self, title: str) -> str | None:
         """Return an existing card_id whose title normalises to the same string."""
@@ -808,6 +813,8 @@ class LocalLibrary:
         names: list[str],
         zip_path: Path,
         title_override: str | None,
+        *,
+        include_id3_description: bool = True,
     ) -> dict[str, Any]:
         """Import a zip containing raw audio files (publisher format).
 
@@ -831,7 +838,7 @@ class LocalLibrary:
                 "doesn't look like an audiobook. Use --title to force import."
             )
 
-        # Title priority: CLI override > ID3 album > zip filename
+        # Title priority: explicit override > ID3 album > zip filename
         raw_album = title_override or id3.get("album") or _title_from_zip_name(zip_path.name)
         author = id3.get("author", "")
 
@@ -911,9 +918,10 @@ class LocalLibrary:
         if sequence_number is not None:
             payload["metadata"]["sequence_number"] = sequence_number
 
-        # Description from ID3 comment tag
+        # Optional description from ID3 comment tag. For BorrowBox imports we
+        # prefer provider metadata or ABS matching over embedded boilerplate.
         comment = id3.get("comment", "")
-        if comment:
+        if include_id3_description and comment:
             from yoto_bulk.card_utils import MAX_DESCRIPTION_LENGTH
             payload["metadata"]["description"] = comment[:MAX_DESCRIPTION_LENGTH]
 
@@ -1270,5 +1278,3 @@ async def _download_file(
             logger.warning("Download failed after %d attempts: %s – %s", max_attempts, dest.name, exc)
             return False
     return False
-
-

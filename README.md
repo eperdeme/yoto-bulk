@@ -110,9 +110,32 @@ the configured ABS token without Cloudflare Access headers.
 
 For a local-to-server cutover, stop both local application containers before
 taking a final Redis `SAVE` snapshot and copying `tokens.json`. Back up the
-snapshot, settings, tokens, and existing server Compose file first. Restore
-`dump.rdb` into an empty server `redis/` directory **before Redis first starts**;
-an existing append-only database takes precedence over a restored snapshot.
+snapshot, settings, tokens, and existing server Compose file first. To restore
+an RDB snapshot, place `dump.rdb` in an empty server `redis/` directory and
+initialize append-only persistence from that snapshot:
+
+```bash
+docker compose run -d --no-deps --name media-mgmt-yoto-redis-restore \
+  yoto-redis redis-server --appendonly no --save 60 1 --loglevel warning
+docker exec media-mgmt-yoto-redis-restore redis-cli ping
+docker exec media-mgmt-yoto-redis-restore redis-cli DBSIZE
+docker exec media-mgmt-yoto-redis-restore redis-cli CONFIG SET appendonly yes
+docker exec media-mgmt-yoto-redis-restore redis-cli INFO persistence
+```
+
+Check that the expected records loaded and wait for `aof_rewrite_in_progress:0`,
+`aof_last_bgrewrite_status:ok`, and `aof_last_write_status:ok`. Then stop and
+remove the temporary container and start the normal service:
+
+```bash
+docker stop media-mgmt-yoto-redis-restore
+docker rm media-mgmt-yoto-redis-restore
+docker compose up -d --wait yoto-redis
+```
+
+Starting directly with `--appendonly yes` does not import `dump.rdb`, even
+when no append-only database exists yet. Do not replace an existing database
+without first stopping its writers and backing up its entire persistence directory.
 Verify snapshot checksums, cached card provenance (`source`, `external_id`),
 credential decryption, service health, and ABS connectivity before using the
 new UI. Keep the local writers stopped after cutover. No local-library import

@@ -1,0 +1,100 @@
+services:
+  yoto-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes --save 60 1 --loglevel warning
+    volumes:
+      - ../docker/yoto-bulk/redis:/data
+    networks:
+      - yoto-backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    labels:
+      traefik.enable: "false"
+
+  borrowbox-server:
+    build:
+      context: .
+    restart: unless-stopped
+    ports:
+      - "192.168.1.6:8000:8000"
+    env_file:
+      - ../docker/yoto-bulk/.env
+    environment:
+      BORROWBOX_REDIS_URL: redis://yoto-redis:6379/0
+      BORROWBOX_HOST: "0.0.0.0"
+      BORROWBOX_PORT: "8000"
+      BORROWBOX_YOTO_API_URL: http://192.168.1.6:8001
+      BORROWBOX_ZIP_ARCHIVE_DIR: /zip-archive
+      YOTO_BULK_DATA_DIR: /yoto-data
+      YOTO_BULK_ABS_URL: http://audiobookshelf:80
+      YOTO_BULK_ABS_CF_ACCESS_CLIENT_ID: ""
+      YOTO_BULK_ABS_CF_ACCESS_CLIENT_SECRET: ""
+    volumes:
+      - ../docker/yoto-bulk/yoto-data:/yoto-data:ro
+      - ../docker/yoto-bulk/zip-archive:/zip-archive
+    networks:
+      - yoto-backend
+      - traefik_proxy
+    depends_on:
+      yoto-redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import json, urllib.request; assert json.load(urllib.request.urlopen('http://localhost:8000/health', timeout=3))['status'] == 'ok'"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      traefik.enable: "false"
+
+  yoto-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.yoto
+    restart: unless-stopped
+    ports:
+      - "192.168.1.6:8001:8001"
+    env_file:
+      - ../docker/yoto-bulk/.env
+    environment:
+      YOTO_BULK_YOTO_SERVER_HOST: "0.0.0.0"
+      YOTO_BULK_YOTO_SERVER_PORT: "8001"
+      YOTO_BULK_REDIS_URL: redis://yoto-redis:6379/0
+      YOTO_BULK_DATA_DIR: /yoto-data
+      YOTO_BULK_ABS_URL: http://audiobookshelf:80
+      YOTO_BULK_ABS_CF_ACCESS_CLIENT_ID: ""
+      YOTO_BULK_ABS_CF_ACCESS_CLIENT_SECRET: ""
+    volumes:
+      - ../docker/yoto-bulk/yoto-data:/yoto-data
+    networks:
+      - yoto-backend
+      - traefik_proxy
+    depends_on:
+      yoto-redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import json, urllib.request; assert json.load(urllib.request.urlopen('http://localhost:8001/health', timeout=3))['status'] == 'ok'"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      traefik.enable: "false"
+
+networks:
+  yoto-backend:
+    internal: true
+  traefik_proxy:
+    external: true

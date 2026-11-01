@@ -69,6 +69,55 @@ Expected local endpoints:
 - `http://localhost:8000/` for the web UI and BorrowBox APIs
 - `http://localhost:8001/health` for `yoto-server`
 
+### Deploy into the media-mgmt stack
+
+The server integration in [docker-compose.media-mgmt.yml](docker-compose.media-mgmt.yml)
+targets `192.168.1.6` and the existing `traefik_proxy` Docker network. Clone this
+repository into `/home/eperdeme/media-mgmt/yoto-bulk`, then add this top-level
+entry to `/home/eperdeme/media-mgmt/docker-compose.yaml`:
+
+```yaml
+include:
+  - ./yoto-bulk/docker-compose.media-mgmt.yml
+```
+
+Persistent state lives outside the checkout in `docker/yoto-bulk/`:
+
+- `.env`: private settings, including the original `BORROWBOX_SECRET_KEY` and ABS token
+- `redis/`: Redis snapshot and append-only persistence
+- `yoto-data/`: Yoto `tokens.json` and transient cache
+- `zip-archive/`: new download archives (existing archives need not be migrated)
+
+Create these directories and install `.env` and `tokens.json` with restrictive
+permissions before starting. Never commit settings, tokens, or database snapshots.
+Preserve the credential encryption key when restoring Redis, or saved BorrowBox
+credentials cannot be decrypted.
+
+From `/home/eperdeme/media-mgmt`:
+
+```bash
+docker compose config --quiet
+docker compose up -d --build --wait yoto-redis borrowbox-server yoto-server
+docker compose ps yoto-redis borrowbox-server yoto-server
+```
+
+Only these services need to be started or rebuilt; do not restart the rest of
+the media stack. The UI is at `http://192.168.1.6:8000/` and its browser-facing
+Yoto API is at `http://192.168.1.6:8001`. These are LAN-only HTTP endpoints,
+not public Traefik routes. Redis has no published port. Both applications
+reach the existing ABS service directly at `http://audiobookshelf:80`, using
+the configured ABS token without Cloudflare Access headers.
+
+For a local-to-server cutover, stop both local application containers before
+taking a final Redis `SAVE` snapshot and copying `tokens.json`. Back up the
+snapshot, settings, tokens, and existing server Compose file first. Restore
+`dump.rdb` into an empty server `redis/` directory **before Redis first starts**;
+an existing append-only database takes precedence over a restored snapshot.
+Verify snapshot checksums, cached card provenance (`source`, `external_id`),
+credential decryption, service health, and ABS connectivity before using the
+new UI. Keep the local writers stopped after cutover. No local-library import
+or destructive ABS migration is needed: ABS remains the source of truth.
+
 ## Configuration
 
 Configuration is loaded from `.env`.
